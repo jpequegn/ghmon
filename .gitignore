@@ -1,0 +1,30 @@
+# Binaries
+ghmon
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Output
+*.out
+
+# Dependency directories
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config with secrets (user's local config)
+# Note: ~/.ghmon/ is outside repo, but just in case
+config.yaml
+*.db
