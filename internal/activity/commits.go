@@ -2,6 +2,7 @@
 package activity
 
 import (
+	"strings"
 	"time"
 
 	"github.com/julienpequegnot/ghmon/internal/database"
@@ -14,6 +15,14 @@ type Commit struct {
 	SHA         string
 	Message     string
 	CommittedAt time.Time
+}
+
+// UserCommitActivity holds commit stats per user
+type UserCommitActivity struct {
+	AccountID int64
+	Username  string
+	Count     int
+	Repos     []string
 }
 
 type CommitRepository struct {
@@ -101,4 +110,40 @@ func (r *CommitRepository) CountByAccount(since time.Time) (map[int64]int, error
 		counts[accountID] = count
 	}
 	return counts, rows.Err()
+}
+
+// GetUserActivity returns commit activity grouped by user with repo details
+func (r *CommitRepository) GetUserActivity(since time.Time, limit int) ([]UserCommitActivity, error) {
+	rows, err := r.db.Query(`
+		SELECT
+			c.account_id,
+			a.username,
+			COUNT(*) as commit_count,
+			GROUP_CONCAT(DISTINCT c.repo_name) as repos
+		FROM commits c
+		JOIN accounts a ON c.account_id = a.id
+		WHERE c.committed_at >= ?
+		GROUP BY c.account_id
+		ORDER BY commit_count DESC
+		LIMIT ?
+	`, since, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var activities []UserCommitActivity
+	for rows.Next() {
+		var ua UserCommitActivity
+		var repos string
+		if err := rows.Scan(&ua.AccountID, &ua.Username, &ua.Count, &repos); err != nil {
+			return nil, err
+		}
+		if repos != "" {
+			ua.Repos = strings.Split(repos, ",")
+		}
+		activities = append(activities, ua)
+	}
+
+	return activities, rows.Err()
 }
