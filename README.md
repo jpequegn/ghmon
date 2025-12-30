@@ -44,6 +44,9 @@ ghmon digest --smart
 
 # Export to markdown
 ghmon export > weekly.md
+
+# Run as daemon (fetches hourly by default)
+ghmon daemon --interval 60
 ```
 
 ## Commands
@@ -58,7 +61,8 @@ ghmon export > weekly.md
 | `ghmon accounts` | List monitored accounts |
 | `ghmon digest` | Show activity summary (--smart for AI insights) |
 | `ghmon show <user>` | Show user details |
-| `ghmon export` | Generate markdown report |
+| `ghmon export` | Generate markdown report (--days) |
+| `ghmon daemon` | Run with scheduled fetching (--interval) |
 
 ## Configuration
 
@@ -94,7 +98,7 @@ digest:
 - [x] Trending stars detection
 - [x] Focus area extraction (--smart flag)
 
-### Phase 3 (Export & Polish)
-- [ ] export command
-- [ ] Daemon mode
-- [ ] Rate limit improvements
+### Phase 3 (Export & Polish) - Complete
+- [x] export command
+- [x] Daemon mode
+- [x] Rate limit improvements
