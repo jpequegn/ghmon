@@ -1,0 +1,465 @@
+# Phase 3 Export & Polish Implementation Plan
+
+> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+
+**Goal:** Add markdown export command, daemon mode for scheduled fetching, and rate limit improvements.
+
+**Architecture:** Export command generates structured markdown from digest data. Daemon mode runs fetch on a configurable schedule using Go's ticker. Rate limiting tracks remaining API calls and pauses when near limit.
+
+**Tech Stack:** Go, Cobra, existing SQLite database, GitHub API rate limit headers
+
+---
+
+## Task 1: Export Command
+
+**Files:**
+- Create: `cmd/export.go`
+
+**Step 1: Create the export command**
+
+```go
+// cmd/export.go
+package cmd
+
+import (
+	"fmt"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/julienpequegnot/ghmon/internal/account"
+	"github.com/julienpequegnot/ghmon/internal/activity"
+	"github.com/julienpequegnot/ghmon/internal/analysis"
+	"github.com/julienpequegnot/ghmon/internal/config"
+	"github.com/julienpequegnot/ghmon/internal/database"
+	"github.com/spf13/cobra"
+)
+
+var exportCmd = &cobra.Command{
+	Use:   "export",
+	Short: "Generate markdown report",
+	Long:  `Exports activity digest as markdown for sharing or archiving.`,
+	RunE:  runExport,
+}
+
+var (
+	exportDays int
+)
+
+func init() {
+	rootCmd.AddCommand(exportCmd)
+	exportCmd.Flags().IntVar(&exportDays, "days", 7, "Number of days to include in export")
+}
+
+func runExport(cmd *cobra.Command, args []string) error {
+	db, err := database.New(config.DBPath())
+	if err != nil {
+		return fmt.Errorf("failed to open database: %w", err)
+	}
+	defer db.Close()
+
+	since := time.Now().AddDate(0, 0, -exportDays)
+	endDate := time.Now()
+
+	accountRepo := account.NewRepository(db)
+	commitRepo := activity.NewCommitRepository(db)
+	repoRepo := activity.NewRepoRepository(db)
+	starRepo := activity.NewStarRepository(db)
+
+	accounts, _ := accountRepo.List()
+	accountMap := make(map[int64]*account.Account)
+	for i := range accounts {
+		accountMap[accounts[i].ID] = &accounts[i]
+	}
+
+	commitCounts, _ := commitRepo.CountByAccount(since)
+	newRepos, _ := repoRepo.GetNewSince(since)
+	recentStars, _ := starRepo.GetSince(since)
+	trendingRepos, _ := starRepo.GetTrendingRepos(since, 2)
+
+	totalCommits := 0
+	for _, c := range commitCounts {
+		totalCommits += c
+	}
+
+	var sb strings.Builder
+
+	// Header
+	sb.WriteString(fmt.Sprintf("# GitHub Activity Digest\n\n"))
+	sb.WriteString(fmt.Sprintf("**Period:** %s - %s\n\n",
+		since.Format("January 2, 2006"),
+		endDate.Format("January 2, 2006")))
+
+	// Summary
+	sb.WriteString("## Summary\n\n")
+	sb.WriteString(fmt.Sprintf("- **Accounts monitored:** %d\n", len(accounts)))
+	sb.WriteString(fmt.Sprintf("- **Total commits:** %d\n", totalCommits))
+	sb.WriteString(fmt.Sprintf("- **New repositories:** %d\n", len(newRepos)))
+	sb.WriteString(fmt.Sprintf("- **Stars given:** %d\n\n", len(recentStars)))
+
+	// Most Active
+	if len(commitCounts) > 0 {
+		sb.WriteString("## Most Active\n\n")
+		sb.WriteString("| Developer | Commits |\n")
+		sb.WriteString("|-----------|--------:|\n")
+
+		type accountCommits struct {
+			username string
+			count    int
+		}
+		var sorted []accountCommits
+		for accID, count := range commitCounts {
+			if acc, ok := accountMap[accID]; ok {
+				sorted = append(sorted, accountCommits{acc.Username, count})
+			}
+		}
+		sort.Slice(sorted, func(i, j int) bool {
+			return sorted[i].count > sorted[j].count
+		})
+
+		limit := 10
+		if len(sorted) < limit {
+			limit = len(sorted)
+		}
+		for i := 0; i < limit; i++ {
+			sb.WriteString(fmt.Sprintf("| [%s](https://github.com/%s) | %d |\n",
+				sorted[i].username, sorted[i].username, sorted[i].count))
+		}
+		sb.WriteString("\n")
+	}
+
+	// New Repositories
+	if len(newRepos) > 0 {
+		sb.WriteString("## New Repositories\n\n")
+
+		limit := 10
+		if len(newRepos) < limit {
+			limit = len(newRepos)
+		}
+		for i := 0; i < limit; i++ {
+			repo := newRepos[i]
+			desc := repo.Description
+			if desc == "" {
+				desc = "*No description*"
+			}
+			sb.WriteString(fmt.Sprintf("- [%s](https://github.com/%s) - %s\n",
+				repo.FullName, repo.FullName, desc))
+		}
+		sb.WriteString("\n")
+	}
+
+	// Trending Repos
+	if len(trendingRepos) > 0 {
+		sb.WriteString("## Trending (Starred by Multiple Follows)\n\n")
+
+		for _, t := range trendingRepos {
+			sb.WriteString(fmt.Sprintf("- [%s](https://github.com/%s) - ★ by %s\n",
+				t.RepoFullName, t.RepoFullName, strings.Join(t.StarredBy, ", ")))
+		}
+		sb.WriteString("\n")
+	}
+
+	// Languages
+	langStats := analysis.AnalyzeLanguages(newRepos, recentStars)
+	if len(langStats) > 0 {
+		sb.WriteString("## Languages\n\n")
+		sb.WriteString("| Language | Activity |\n")
+		sb.WriteString("|----------|--------:|\n")
+
+		for _, lang := range langStats {
+			sb.WriteString(fmt.Sprintf("| %s | %.0f%% |\n", lang.Language, lang.Percentage))
+		}
+		sb.WriteString("\n")
+	}
+
+	// Footer
+	sb.WriteString("---\n\n")
+	sb.WriteString(fmt.Sprintf("*Generated by [ghmon](https://github.com/julienpequegnot/ghmon) on %s*\n",
+		time.Now().Format("2006-01-02 15:04")))
+
+	fmt.Print(sb.String())
+	return nil
+}
+```
+
+**Step 2: Build and test**
+
+Run:
+```bash
+cd /Users/julienpequegnot/Code/ghmon && go build -o ghmon . && ./ghmon export --help
+```
+
+Expected: Help shows --days flag
+
+**Step 3: Commit**
+
+```bash
+cd /Users/julienpequegnot/Code/ghmon && git add . && git commit -m "feat: add export command for markdown reports"
+```
+
+---
+
+## Task 2: Rate Limit Tracking
+
+**Files:**
+- Modify: `internal/github/client.go`
+
+**Step 1: Add rate limit fields and methods**
+
+Add to `internal/github/client.go`:
+
+1. Add fields to Client struct:
+```go
+type Client struct {
+	token      string
+	httpClient *http.Client
+	rateLimitRemaining int
+	rateLimitReset     time.Time
+}
+```
+
+2. Add a method to check rate limit:
+```go
+// RateLimitRemaining returns the number of API calls remaining
+func (c *Client) RateLimitRemaining() int {
+	return c.rateLimitRemaining
+}
+
+// RateLimitReset returns when the rate limit resets
+func (c *Client) RateLimitReset() time.Time {
+	return c.rateLimitReset
+}
+
+// WaitForRateLimit blocks until rate limit resets if we're near the limit
+func (c *Client) WaitForRateLimit() {
+	if c.rateLimitRemaining < 10 && time.Now().Before(c.rateLimitReset) {
+		waitTime := time.Until(c.rateLimitReset) + time.Second
+		fmt.Printf("Rate limit low (%d remaining), waiting %v...\n", c.rateLimitRemaining, waitTime.Round(time.Second))
+		time.Sleep(waitTime)
+	}
+}
+```
+
+3. Update the doRequest helper to parse rate limit headers:
+```go
+func (c *Client) doRequest(req *http.Request) (*http.Response, error) {
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse rate limit headers
+	if remaining := resp.Header.Get("X-RateLimit-Remaining"); remaining != "" {
+		if val, err := strconv.Atoi(remaining); err == nil {
+			c.rateLimitRemaining = val
+		}
+	}
+	if reset := resp.Header.Get("X-RateLimit-Reset"); reset != "" {
+		if val, err := strconv.ParseInt(reset, 10, 64); err == nil {
+			c.rateLimitReset = time.Unix(val, 0)
+		}
+	}
+
+	return resp, nil
+}
+```
+
+4. Add `"strconv"` to imports
+
+**Step 2: Build and verify**
+
+```bash
+cd /Users/julienpequegnot/Code/ghmon && go build -o ghmon .
+```
+
+**Step 3: Commit**
+
+```bash
+cd /Users/julienpequegnot/Code/ghmon && git add . && git commit -m "feat: add rate limit tracking to GitHub client"
+```
+
+---
+
+## Task 3: Fetch Command Rate Limit Integration
+
+**Files:**
+- Modify: `cmd/fetch.go`
+
+**Step 1: Read current fetch.go**
+
+Read `/Users/julienpequegnot/Code/ghmon/cmd/fetch.go` to understand current structure.
+
+**Step 2: Add rate limit checks**
+
+Update the fetch loop to check rate limits before each account:
+
+1. Before fetching each account, call `client.WaitForRateLimit()`
+
+2. After fetch completes, show rate limit status:
+```go
+fmt.Printf("\nRate limit: %d requests remaining (resets %s)\n",
+	client.RateLimitRemaining(),
+	client.RateLimitReset().Format("15:04"))
+```
+
+**Step 3: Build and test**
+
+```bash
+cd /Users/julienpequegnot/Code/ghmon && go build -o ghmon .
+```
+
+**Step 4: Commit**
+
+```bash
+cd /Users/julienpequegnot/Code/ghmon && git add . && git commit -m "feat: add rate limit protection to fetch command"
+```
+
+---
+
+## Task 4: Daemon Mode
+
+**Files:**
+- Create: `cmd/daemon.go`
+
+**Step 1: Create the daemon command**
+
+```go
+// cmd/daemon.go
+package cmd
+
+import (
+	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/spf13/cobra"
+)
+
+var daemonCmd = &cobra.Command{
+	Use:   "daemon",
+	Short: "Run in daemon mode with scheduled fetching",
+	Long:  `Runs ghmon in the background, fetching activity on a schedule.`,
+	RunE:  runDaemon,
+}
+
+var (
+	daemonInterval int
+)
+
+func init() {
+	rootCmd.AddCommand(daemonCmd)
+	daemonCmd.Flags().IntVar(&daemonInterval, "interval", 60, "Fetch interval in minutes")
+}
+
+func runDaemon(cmd *cobra.Command, args []string) error {
+	interval := time.Duration(daemonInterval) * time.Minute
+
+	fmt.Printf("Starting daemon mode (fetch every %v)\n", interval)
+	fmt.Println("Press Ctrl+C to stop")
+
+	// Run initial fetch
+	fmt.Println("\nRunning initial fetch...")
+	if err := runFetch(cmd, args); err != nil {
+		fmt.Printf("Initial fetch error: %v\n", err)
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	// Handle graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	for {
+		select {
+		case <-ticker.C:
+			fmt.Printf("\n[%s] Running scheduled fetch...\n", time.Now().Format("15:04:05"))
+			if err := runFetch(cmd, args); err != nil {
+				fmt.Printf("Fetch error: %v\n", err)
+			}
+		case <-sigChan:
+			fmt.Println("\nShutting down daemon...")
+			return nil
+		}
+	}
+}
+```
+
+**Step 2: Build and test**
+
+```bash
+cd /Users/julienpequegnot/Code/ghmon && go build -o ghmon . && ./ghmon daemon --help
+```
+
+Expected: Help shows --interval flag
+
+**Step 3: Commit**
+
+```bash
+cd /Users/julienpequegnot/Code/ghmon && git add . && git commit -m "feat: add daemon mode for scheduled fetching"
+```
+
+---
+
+## Task 5: Update README and Final Tests
+
+**Files:**
+- Modify: `README.md`
+
+**Step 1: Run all tests**
+
+```bash
+cd /Users/julienpequegnot/Code/ghmon && go test ./... -v
+```
+
+**Step 2: Update README**
+
+1. Add daemon command to the Commands table:
+```markdown
+| `ghmon daemon` | Run with scheduled fetching (--interval) |
+```
+
+2. Update the Development Status section:
+```markdown
+### Phase 3 (Export & Polish) - Complete
+- [x] export command
+- [x] Daemon mode
+- [x] Rate limit improvements
+```
+
+3. Add usage example for daemon:
+```markdown
+# Run daemon (fetches every hour by default)
+ghmon daemon
+
+# Custom interval (every 30 minutes)
+ghmon daemon --interval 30
+```
+
+**Step 3: Commit and push**
+
+```bash
+cd /Users/julienpequegnot/Code/ghmon && git add . && git commit -m "docs: mark Phase 3 Export & Polish as complete"
+cd /Users/julienpequegnot/Code/ghmon && git push
+```
+
+---
+
+## Summary
+
+**Phase 3 delivers:**
+- `export` command for markdown report generation
+- Rate limit tracking in GitHub client
+- Rate limit protection in fetch command
+- `daemon` command for scheduled fetching
+
+**New capabilities:**
+- `ghmon export > weekly.md` - Generate shareable markdown reports
+- `ghmon daemon --interval 30` - Automated background fetching
+- Automatic rate limit awareness and waiting

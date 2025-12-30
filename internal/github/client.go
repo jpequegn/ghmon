@@ -6,14 +6,17 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 )
 
 const baseURL = "https://api.github.com"
 
 type Client struct {
-	token      string
-	httpClient *http.Client
+	token              string
+	httpClient         *http.Client
+	rateLimitRemaining int
+	rateLimitReset     time.Time
 }
 
 type User struct {
@@ -75,6 +78,25 @@ func NewClient(token string) *Client {
 	}
 }
 
+// RateLimitRemaining returns the number of API calls remaining
+func (c *Client) RateLimitRemaining() int {
+	return c.rateLimitRemaining
+}
+
+// RateLimitReset returns when the rate limit resets
+func (c *Client) RateLimitReset() time.Time {
+	return c.rateLimitReset
+}
+
+// WaitForRateLimit blocks until rate limit resets if we're near the limit
+func (c *Client) WaitForRateLimit() {
+	if c.rateLimitRemaining > 0 && c.rateLimitRemaining < 10 && time.Now().Before(c.rateLimitReset) {
+		waitTime := time.Until(c.rateLimitReset) + time.Second
+		fmt.Printf("Rate limit low (%d remaining), waiting %v...\n", c.rateLimitRemaining, waitTime.Round(time.Second))
+		time.Sleep(waitTime)
+	}
+}
+
 func (c *Client) doRequest(url string) ([]byte, error) {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -91,6 +113,18 @@ func (c *Client) doRequest(url string) ([]byte, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
+
+	// Parse rate limit headers
+	if remaining := resp.Header.Get("X-RateLimit-Remaining"); remaining != "" {
+		if val, err := strconv.Atoi(remaining); err == nil {
+			c.rateLimitRemaining = val
+		}
+	}
+	if reset := resp.Header.Get("X-RateLimit-Reset"); reset != "" {
+		if val, err := strconv.ParseInt(reset, 10, 64); err == nil {
+			c.rateLimitReset = time.Unix(val, 0)
+		}
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("GitHub API error: %s", resp.Status)
@@ -177,6 +211,18 @@ func (c *Client) GetUserStarred(username string) ([]StarredRepo, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
+
+	// Parse rate limit headers
+	if remaining := resp.Header.Get("X-RateLimit-Remaining"); remaining != "" {
+		if val, err := strconv.Atoi(remaining); err == nil {
+			c.rateLimitRemaining = val
+		}
+	}
+	if reset := resp.Header.Get("X-RateLimit-Reset"); reset != "" {
+		if val, err := strconv.ParseInt(reset, 10, 64); err == nil {
+			c.rateLimitReset = time.Unix(val, 0)
+		}
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("GitHub API error: %s", resp.Status)
