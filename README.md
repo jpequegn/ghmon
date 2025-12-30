@@ -56,7 +56,7 @@ ghmon export > weekly.md
 | `ghmon remove <user>` | Remove a user |
 | `ghmon fetch` | Pull recent activity |
 | `ghmon accounts` | List monitored accounts |
-| `ghmon digest` | Show activity summary |
+| `ghmon digest` | Show activity summary (--smart for AI insights) |
 | `ghmon show <user>` | Show user details |
 | `ghmon export` | Generate markdown report |
 
@@ -88,11 +88,11 @@ digest:
 - [x] digest command (--days flag)
 - [x] show command (--days flag)
 
-### Phase 2 (Intelligence)
-- [ ] LLM integration
-- [ ] Language analysis
-- [ ] Trending stars detection
-- [ ] Focus area extraction
+### Phase 2 (Intelligence) - Complete
+- [x] LLM integration (Ollama)
+- [x] Language analysis
+- [x] Trending stars detection
+- [x] Focus area extraction (--smart flag)
 
 ### Phase 3 (Export & Polish)
 - [ ] export command
