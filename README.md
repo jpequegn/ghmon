@@ -78,15 +78,15 @@ digest:
 
 ## Development Status
 
-### Phase 1 (MVP)
-- [ ] Project setup
-- [ ] init command
-- [ ] sync command
-- [ ] add/remove commands
-- [ ] accounts command
-- [ ] fetch command
-- [ ] digest command
-- [ ] show command
+### Phase 1 (MVP) - Complete
+- [x] Project setup
+- [x] init command
+- [x] sync command
+- [x] add/remove commands
+- [x] accounts command
+- [x] fetch command
+- [x] digest command (--days flag)
+- [x] show command (--days flag)
 
 ### Phase 2 (Intelligence)
 - [ ] LLM integration
