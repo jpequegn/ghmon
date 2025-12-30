@@ -2,15 +2,19 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/julienpequegnot/ghmon/internal/account"
 	"github.com/julienpequegnot/ghmon/internal/activity"
+	"github.com/julienpequegnot/ghmon/internal/analysis"
 	"github.com/julienpequegnot/ghmon/internal/config"
 	"github.com/julienpequegnot/ghmon/internal/database"
+	"github.com/julienpequegnot/ghmon/internal/llm"
 	"github.com/spf13/cobra"
 )
 
@@ -22,12 +26,14 @@ var digestCmd = &cobra.Command{
 }
 
 var (
-	digestDays int
+	digestDays  int
+	digestSmart bool
 )
 
 func init() {
 	rootCmd.AddCommand(digestCmd)
 	digestCmd.Flags().IntVar(&digestDays, "days", 7, "Number of days to include in digest")
+	digestCmd.Flags().BoolVar(&digestSmart, "smart", false, "Use LLM for intelligent analysis")
 }
 
 func runDigest(cmd *cobra.Command, args []string) error {
@@ -164,6 +170,17 @@ func runDigest(cmd *cobra.Command, args []string) error {
 		fmt.Println()
 	}
 
+	// Trending repos (starred by multiple accounts)
+	trendingRepos, _ := starRepo.GetTrendingRepos(since, 2)
+	if len(trendingRepos) > 0 {
+		fmt.Printf("%s\n", sectionStyle.Render("🔥 Trending (starred by multiple follows)"))
+		for _, t := range trendingRepos {
+			fmt.Printf("  %s\n", repoStyle.Render(t.RepoFullName))
+			fmt.Printf("    %s\n", dimStyle.Render(fmt.Sprintf("★ by %s", strings.Join(t.StarredBy, ", "))))
+		}
+		fmt.Println()
+	}
+
 	languages := make(map[string]int)
 	for _, repo := range newRepos {
 		if repo.Language != "" {
@@ -203,6 +220,68 @@ func runDigest(cmd *cobra.Command, args []string) error {
 			parts = append(parts, fmt.Sprintf("%s (%.0f%%)", sorted[i].lang, pct))
 		}
 		fmt.Printf("  %s\n\n", dimStyle.Render(joinStrings(parts, " · ")))
+	}
+
+	// Smart analysis with LLM
+	if digestSmart {
+		cfg, err := config.Load()
+		if err != nil {
+			fmt.Printf("%s\n", dimStyle.Render("Note: Could not load config for LLM analysis"))
+		} else {
+			fmt.Printf("%s\n", sectionStyle.Render("💡 Focus Areas (AI-generated)"))
+
+			// Prepare data for LLM
+			langStats := analysis.AnalyzeLanguages(newRepos, recentStars)
+			var trendingNames []string
+			for _, t := range trendingRepos {
+				trendingNames = append(trendingNames, t.RepoFullName)
+			}
+
+			userActivities, _ := commitRepo.GetUserActivity(since, 5)
+			var llmUsers []llm.UserActivity
+			for _, ua := range userActivities {
+				llmUsers = append(llmUsers, llm.UserActivity{
+					Username: ua.Username,
+					Commits:  ua.Count,
+					Repos:    ua.Repos,
+				})
+			}
+
+			mostActive := ""
+			if len(userActivities) > 0 {
+				mostActive = userActivities[0].Username
+			}
+
+			digestData := llm.DigestData{
+				TotalCommits:   totalCommits,
+				TotalRepos:     len(newRepos),
+				TotalStars:     len(recentStars),
+				TopLanguages:   analysis.GetTopLanguageNames(langStats),
+				TrendingRepos:  trendingNames,
+				MostActiveUser: mostActive,
+				ActiveUsers:    llmUsers,
+			}
+
+			prompt := llm.GenerateDigestPrompt(digestData)
+			client := llm.NewClient("http://localhost:11434", cfg.APIs.LLMModel)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			response, err := client.Generate(ctx, prompt)
+			cancel()
+
+			if err != nil {
+				fmt.Printf("  %s\n\n", dimStyle.Render(fmt.Sprintf("LLM analysis unavailable: %v", err)))
+			} else {
+				// Print each line of the response
+				for _, line := range strings.Split(response, "\n") {
+					line = strings.TrimSpace(line)
+					if line != "" {
+						fmt.Printf("  %s\n", line)
+					}
+				}
+				fmt.Println()
+			}
+		}
 	}
 
 	return nil
