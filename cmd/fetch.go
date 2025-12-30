@@ -74,6 +74,9 @@ func runFetch(cmd *cobra.Command, args []string) error {
 			semaphore <- struct{}{}
 			defer func() { <-semaphore }()
 
+			// Check rate limit before fetching
+			client.WaitForRateLimit()
+
 			commits, repos, stars := fetchAccountActivity(client, &acc, commitRepo, repoRepo, starRepo)
 
 			mu.Lock()
@@ -91,6 +94,14 @@ func runFetch(cmd *cobra.Command, args []string) error {
 	wg.Wait()
 
 	fmt.Printf("\nFetch complete: %d commits, %d new repos, %d stars\n", totalCommits, totalRepos, totalStars)
+
+	// Show rate limit status
+	if client.RateLimitRemaining() > 0 {
+		fmt.Printf("Rate limit: %d requests remaining (resets %s)\n",
+			client.RateLimitRemaining(),
+			client.RateLimitReset().Format("15:04"))
+	}
+
 	fmt.Println("Run 'ghmon digest' to see the summary.")
 
 	return nil
